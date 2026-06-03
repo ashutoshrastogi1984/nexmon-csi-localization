@@ -1,0 +1,20 @@
+# Capture files
+data/sample/*.pcap
+data/*.pcap
+captures/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+output/
+
+# Build artifacts
+*.o
+*.bin
+*.ko
+
+# OS
+.DS_Store
+Thumbs.db
