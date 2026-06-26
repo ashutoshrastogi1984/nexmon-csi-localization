@@ -18,7 +18,6 @@ sudo apt-get install texinfo
 ```
 
 ### `libmpc.so.3: wrong ELF class: ELFCLASS64`
-The cross-compiler needs 32-bit libmpc:
 ```bash
 sudo apt-get install libmpc3:i386
 export LD_LIBRARY_PATH=/usr/lib/i386-linux-gnu:$LD_LIBRARY_PATH
@@ -41,7 +40,7 @@ make clean && make
 Add include files to Makefile assembler call (see Step 4 in README).
 
 ### `enable_carrier_search does not exist`
-Two patch hunks fail to apply due to line number mismatch. Use commit `13f87d2`:
+Use tested commit `13f87d2`:
 ```bash
 cd ~/nexmon/patches/bcm4366c0/10_10_122_20/nexmon_csi
 git checkout 13f87d2
@@ -50,7 +49,6 @@ make
 ```
 
 ### `b43-beautifier: SyntaxError: Missing parentheses in call to 'print'`
-Fix Python 2 shebang:
 ```bash
 sudo apt-get install python2 -y
 sudo sed -i 's|#!/usr/bin/env python$|#!/usr/bin/env python2|' \
@@ -61,14 +59,34 @@ sudo sed -i 's|#!/usr/bin/env python$|#!/usr/bin/env python2|' \
 
 ## Router Issues
 
-### `nexutil: error ret=-1 errno=95`
-The radio hardware is not up. Run:
+### `nexutil: error ret=-1 errno=19` (No such device)
+eth6 is not up or Nexmon driver not active. Run full activation sequence:
 ```bash
-wl -i eth6 up
-ifconfig eth6 up
-wl -i eth6 radio on
+ssh admin@192.168.1.1 "service restart_wireless"
+# Wait 15 seconds
+ssh admin@192.168.1.1 "cd /jffs && wl -i eth6 up && ifconfig eth6 up && PARAMS=\$(./makecsiparams -c 44/40 -C 15 -N 1) && ./nexutil -Ieth6 -s500 -b -l34 -v \$PARAMS && wl -i eth6 monitor 1 && echo DONE"
 ```
-Then retry nexutil.
+
+### `nexutil -g500` returns all zeros after setting
+Nexmon patch not active on eth6. Run `service restart_wireless` first, then reapply CSI params. The `wl eth6 down/up` alone is insufficient — `restart_wireless` is required.
+
+### Channel resets to 149/20MHz after `service restart_wireless`
+This always happens. Fix via web UI:
+- Open `http://192.168.1.1` → Wireless → Professional → 5GHz
+- Set channel=44, bandwidth=40MHz → Apply
+- Verify: `ssh admin@192.168.1.1 "wl -i eth6 chanspec"` → must show `44l (0xd82e)`
+- Then reapply CSI params
+
+### `wl -i eth6 chanspec 44/40l` returns error
+The `wl chanspec` set command does not work on eth6 on this router. Channel is set by `makecsiparams -c 44/40` command via nexutil — NOT by wl chanspec. Use web UI to set channel, then nexutil applies it correctly.
+
+### `makecsiparams: not found` or `nexutil: not found`
+Tools are in `/jffs/`, not in system PATH. Always use full path:
+```bash
+/jffs/makecsiparams -c 44/40 -C 15 -N 1
+/jffs/nexutil -Ieth6 -s500 -b -l34 -v $PARAMS
+```
+Or `cd /jffs` first.
 
 ### SSID not visible after flashing
 ```bash
@@ -76,56 +94,86 @@ ssh admin@192.168.1.1 "service restart_wireless"
 ```
 
 ### Router crashes when running `rmmod dhd`
-This is normal — use the `init-start` script approach instead of manual rmmod.
-Never run `rmmod dhd` interactively over SSH.
+Never run `rmmod dhd` interactively over SSH — it drops the connection and may corrupt state. Use the `init-start` script approach which runs safely at boot.
 
-### `dmesg | grep nexmon` shows nothing
-The stock dhd module is loaded. The init-start script runs `rmmod dhd && insmod /jffs/dhd.ko` at boot. Verify the script exists:
+### `dmesg | grep nexmon` shows nothing after reboot
+The init-start script waits 30 seconds then reloads Nexmon driver. Wait at least 45 seconds after reboot before checking. Verify script exists:
 ```bash
 cat /jffs/scripts/init-start
+```
+Should contain:
+```
+#!/bin/sh
+sleep 30
+/sbin/rmmod dhd
+/sbin/insmod /jffs/dhd.ko
 ```
 
 ---
 
 ## Capture Issues
 
-### `0 packets captured` with `-m ff:ff:ff:ff:ff:ff`
-Do NOT use `-m ff:ff:ff:ff:ff:ff`. This sets `n_mac_addr=1` which filters for broadcast source MAC — no real device uses this. Simply omit `-m`:
+### `0 packets captured` with MAC filter
+Check in order:
+1. Is ESP32-C5 powered and transmitting? `sudo cat /dev/ttyACM0` — counter must increase with ESP_OK
+2. Is `wl -i eth6 monitor 1` active? Rerun full CSI activation command
+3. Is channel correct? `ssh admin@192.168.1.1 "wl -i eth6 chanspec"` → must show `44l (0xd82e)`
+4. Is ethernet cable connected between patched router LAN port and laptop eno1?
+5. Does eno1 have IP in 192.168.1.x? `ip a show eno1`
+
+### Permission denied writing to `/tmp/`
+sudo tcpdump cannot write to /tmp on Ubuntu. Always write to home directory:
 ```bash
-PARAMS=$(./makecsiparams -c 44/80 -C 15 -N 15)
+sudo tcpdump -i eno1 ether src 4e:45:58:4d:4f:4e -w ~/captures/test.pcap
 ```
 
-### CSI packets not reaching Ubuntu machine
-The CSI packets are broadcast UDP from source IP `10.10.10.10` with source MAC `4e:45:58:4d:4f:4e` (NEXMON in ASCII). Capture by MAC:
-```bash
-sudo tcpdump -i eno1 -n ether src 4e:45:58:4d:4f:4e -w capture.pcap
-```
+### UDP packets on port 7788 appearing but parser rejects them
+Port 7788 is used by the ASUS router's own service — not Nexmon CSI. Nexmon CSI packets are identified by source MAC `4e:45:58:4d:4f:4e`, not by port number.
 
-### Only Core 0 SS 0 in captures
-With a 1×1 transmitter (phone), only one core/SS combination appears per frame. Use `-C 15 -N 15` to capture on all router antennas. The four antenna streams appear as `core_ss` values `0x0000, 0x0010, 0x0020, 0x0030` (core=0, ss=0/2/4/6).
+### Very low packet count at some positions (~30k vs ~55k)
+Normal variation due to distance and multipath. Acceptable if:
+- Duration ≥ 180 seconds (check with parser `--list-macs`)
+- fps ≥ 70
+- All 4 cores present
+
+If duration < 180 seconds → recapture that position for the full 3 minutes.
+
+### `No CSI frames assembled` in parser output
+Raw packets captured but Nexmon header invalid — router lost monitor mode mid-capture. Reactivate CSI and recapture that position from scratch:
+```bash
+ssh admin@192.168.1.1 "service restart_wireless"
+# Wait 15 seconds, then reapply CSI params
+ssh admin@192.168.1.1 "cd /jffs && wl -i eth6 up && ifconfig eth6 up && PARAMS=\$(./makecsiparams -c 44/40 -C 15 -N 1) && ./nexutil -Ieth6 -s500 -b -l34 -v \$PARAMS && wl -i eth6 monitor 1 && echo DONE"
+```
 
 ---
 
 ## Parsing Issues
 
-### Magic bytes
-Pre-PR#256 format uses 4-byte magic `0x11111111`.
-Post-PR#256 (commit `13f87d2`) uses 2-byte magic `0x1111`.
-Always check first 2 bytes: if `== 0x1111`, use 2-byte offset.
+### Core separation is critical
+Parser must group by `(src_mac, seq, core_id)` — NOT by `(src_mac, seq)`.
+Grouping without core_id averages all 4 cores together producing garbage CSI.
 
-### Header layout (commit 13f87d2)
-```
-Offset  Size  Field
-0       2     Magic (0x1111)
-2       6     Source MAC
-8       2     Sequence number
-10      2     Core & SS (core=bits[2:0], ss=bits[5:3])
-12      2     Chanspec (may be 0x0000 in this commit — bug)
-14      2     Chip version (0xE22A = bcm4366c0 = also encodes chanspec)
-16      2     Padding
-18      N*4   CSI data (N=64/128/256 for 20/40/80 MHz)
-```
+### Only 1 core appearing instead of 4
+Verify C15 parameter was used: `makecsiparams -c 44/40 -C 15 -N 1`
+C15 = binary 1111 = all 4 cores enabled.
+At 80MHz only core 0 is active regardless of C value — must use 40MHz.
 
-### CSI data format (bcm4366c0)
-Use the official `unpack_float_acphy` with `nman=12, nexp=6, nbits=10`.
-See `parsing/unpack_float.py`.
+### Subcarrier count: 64 per core at 40MHz
+At 40MHz: 512 bytes payload ÷ 8 bytes per complex sample = 64 subcarriers per core.
+Total features for 4-core MIMO at 40MHz: 64 × 4 = 256 raw, or 61 × 4 = 244 after removing subs 0, 1, 63.
+
+### Subcarriers to remove before ML
+- Sub 0: DC component — always zero or near-zero
+- Sub 1: low amplitude artifact
+- Sub 63: DC spike artifact identified from diagnostic plot
+- Valid subcarriers: indices 2-62 = 61 subcarriers per core
+
+### Amplitude near-zero warning (~22%)
+Expected at 40MHz due to null/guard subcarriers and pilot tones.
+Near-zero ~22% is normal and not a problem for the ML pipeline.
+
+### `uint32` to `int32` casting bug
+Earlier parser versions cast raw bytes as uint32 before converting to int32,
+corrupting ~50% of subcarrier values. The current `nexmon_csi.py` in `parsing/`
+uses correct signed casting. Always use the version from this repo.
