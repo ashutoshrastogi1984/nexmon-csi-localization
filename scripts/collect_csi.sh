@@ -1,54 +1,46 @@
 #!/bin/bash
-# collect_csi.sh — Configure router and capture CSI on Ubuntu
-# Usage: ./collect_csi.sh <channel> <bw> <output.pcap> [duration_seconds]
-# Example: ./collect_csi.sh 44 80 location_A.pcap 30
+# collect_csi.sh — Configure router CSI and capture on Ubuntu
+# Usage: ./collect_csi.sh <output.pcap>
+# Example: ./collect_csi.sh ~/captures/16pos_experiment/pos1_4ant.pcap
+#
+# IMPORTANT: Set channel to 44/40MHz via web UI BEFORE running this script
+#   http://192.168.1.1 → Wireless → Professional → 5GHz → ch44, 40MHz → Apply
 
 ROUTER_IP="192.168.1.1"
 ROUTER_USER="admin"
-CHANNEL=${1:-44}
-BW=${2:-80}
-OUTPUT=${3:-capture.pcap}
-DURATION=${4:-30}
+OUTPUT=${1:-capture.pcap}
 
 echo "=== Nexmon CSI Collection ==="
-echo "Channel: ${CHANNEL}/${BW}MHz  Output: ${OUTPUT}  Duration: ${DURATION}s"
+echo "Output: ${OUTPUT}"
 
-# Configure router
-echo "[1/3] Configuring router..."
-ssh ${ROUTER_USER}@${ROUTER_IP} "
-  cd /jffs
-  wl -i eth6 up
-  ifconfig eth6 up
-  PARAMS=\$(./makecsiparams -c ${CHANNEL}/${BW} -C 15 -N 15)
-  ./nexutil -Ieth6 -s500 -b -l34 -v \$PARAMS
-  wl -i eth6 monitor 1
-  echo Router configured on channel ${CHANNEL}/${BW}
-"
+# Step 1 — Restart wireless to reload Nexmon driver
+echo "[1/3] Restarting wireless (reloads Nexmon driver)..."
+ssh ${ROUTER_USER}@${ROUTER_IP} "service restart_wireless"
+sleep 15
 
-# Start capture
-echo "[2/3] Capturing for ${DURATION}s..."
+# Step 2 — Apply CSI params and enable monitor mode
+echo "[2/3] Applying CSI params (ch44/40MHz, C15, N=1)..."
+ssh ${ROUTER_USER}@${ROUTER_IP} "cd /jffs && \
+    wl -i eth6 up && \
+    ifconfig eth6 up && \
+    PARAMS=\$(./makecsiparams -c 44/40 -C 15 -N 1) && \
+    ./nexutil -Ieth6 -s500 -b -l34 -v \$PARAMS && \
+    wl -i eth6 monitor 1 && \
+    echo DONE"
+
+# Step 3 — Verify channel
+echo "[3/3] Verifying channel..."
+CHANSPEC=$(ssh ${ROUTER_USER}@${ROUTER_IP} "wl -i eth6 chanspec")
+echo "  Chanspec: ${CHANSPEC}"
+if [[ "$CHANSPEC" != *"0xd82e"* ]]; then
+    echo "  WARNING: Channel is not 44l (0xd82e) — set via web UI first!"
+    exit 1
+fi
+
+echo ""
+echo "CSI active. Starting capture → ${OUTPUT}"
+echo "Press Ctrl+C to stop."
+echo ""
+
 mkdir -p $(dirname ${OUTPUT})
-sudo timeout ${DURATION} tcpdump -i eno1 -n \
-    ether src 4e:45:58:4d:4f:4e \
-    -w ${OUTPUT}
-
-# Summary
-echo "[3/3] Capture complete."
-python3 -c "
-from scapy.all import rdpcap, UDP
-import struct
-pkts = rdpcap('${OUTPUT}')
-count = sum(1 for p in pkts if UDP in p and p[UDP].dport==5500)
-print(f'  Packets captured: {count}')
-from collections import Counter
-c = Counter()
-for p in pkts:
-    if UDP not in p or p[UDP].dport!=5500: continue
-    pay = bytes(p[UDP].payload)
-    if len(pay)<12: continue
-    if struct.unpack_from('<H',pay,0)[0]!=0x1111: continue
-    cs = struct.unpack_from('<H',pay,10)[0]
-    c[(cs&7,(cs>>3)&7)] += 1
-for (core,ss),n in sorted(c.items()):
-    print(f'  Core {core} SS {ss}: {n} packets')
-" 2>/dev/null || echo "  (install scapy for summary)"
+sudo tcpdump -i eno1 ether src 4e:45:58:4d:4f:4e -w ${OUTPUT}
