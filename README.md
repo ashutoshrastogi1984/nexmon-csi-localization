@@ -1,167 +1,91 @@
 # Nexmon CSI Localization — RT-AC86U
 
-WiFi CSI-based indoor localization using fingerprinting, time reversal, and machine learning on the **Asus RT-AC86U** (bcm4366c0 chipset).
+WiFi CSI-based indoor localization using **MIMO fingerprinting** and machine learning on the **ASUS RT-AC86U** (bcm4366c0 chipset).
+
+This repo supports a complete end-to-end pipeline:
+- Router patching (from scratch OR pre-compiled binaries)
+- ESP32-C5 probe request transmitter
+- 16-position 4×4 grid CSI data capture
+- Parser with 4-core MIMO separation
+- Classification and regression ML pipelines (1-antenna vs 4-antenna comparison)
 
 ---
 
-## Hardware & Software Requirements
+## Hardware Used
 
 | Item | Details |
 |------|---------|
-| Router | Asus RT-AC86U (bcm4366c0) |
-| Router firmware | Merlin 386.14_2 |
-| Build machine | Ubuntu 22.04 (x86_64) |
-| Python | 3.10+ |
-| Transmitter | Any WiFi device (phone, laptop) |
+| Patched router | ASUS RT-AC86U (bcm4366c0), Merlin 386.14_2, Nexmon CSI firmware |
+| Unpatched router | ASUS RT-AC86U, AP mode, ch44/40MHz |
+| Transmitter | ESP32-C5 (MAC: D0:CF:13:E2:88:94), probe requests via `esp_wifi_80211_tx()` |
+| Capture machine | Ubuntu 22.04 (x86_64), ethernet connected to patched router |
 
 ---
 
 ## Repository Structure
 
 ```
-nexmon_csi_localization/
-├── README.md                    ← You are here
+nexmon-csi-localization/
+├── README.md                         ← You are here
 ├── docs/
-│   ├── 01_ubuntu_setup.md       ← Build environment setup
-│   ├── 02_router_setup.md       ← Merlin firmware + SSH
-│   ├── 03_nexmon_build.md       ← Nexmon base framework build
-│   ├── 04_nexmon_csi_build.md   ← nexmon_csi patch build & flash
-│   ├── 05_csi_collection.md     ← CSI capture procedure
-│   └── 06_troubleshooting.md    ← Known issues & fixes
+│   ├── 01_ubuntu_setup.md            ← Build environment setup (Ubuntu 22.04)
+│   ├── 02_router_setup.md            ← Merlin firmware flash + SSH setup
+│   ├── 03_nexmon_build.md            ← Nexmon base framework build
+│   ├── 04_nexmon_csi_build.md        ← nexmon_csi patch build and flash
+│   ├── 05_csi_collection.md          ← CSI capture procedure (verified working)
+│   ├── 06_troubleshooting.md         ← All known issues and fixes
+│   └── 07_data_capture_pipeline.md   ← Complete foolproof 16-position pipeline
+├── firmware/                         ← Pre-compiled binaries (Path B)
+│   ├── dhd.ko                        ← Nexmon patched kernel module
+│   ├── nexutil                       ← CSI configuration utility
+│   └── makecsiparams                 ← CSI parameter generator
 ├── scripts/
-│   ├── setup_env.sh             ← One-shot environment setup
-│   ├── flash_csi_firmware.sh    ← Build & flash patched firmware
-│   ├── collect_csi.sh           ← Configure router & start capture
-│   └── router_init.sh           ← Router startup script (/jffs)
+│   ├── setup_env.sh                  ← Build environment setup script
+│   ├── flash_csi_firmware.sh         ← Build and flash patched firmware
+│   ├── collect_csi.sh                ← Router CSI activation + capture
+│   └── router_init.sh                ← Router /jffs startup script
 ├── parsing/
-│   ├── parse_csi.py             ← Main CSI parser (bcm4366c0)
-│   ├── unpack_float.py          ← Official float unpacking
-│   └── requirements.txt
+│   ├── nexmon_csi.py                 ← Main parser (bcm4366c0, v3, core separation)
+│   ├── parse_csi.py                  ← Original parser reference
+│   ├── unpack_float.py               ← Official Broadcom float unpacking
+│   └── requirements.txt              ← Python dependencies
 ├── ml/
-│   └── README.md                ← ML pipeline (coming soon)
+│   ├── README.md                     ← ML pipeline overview
+│   ├── CSI_MIMO_Classification_Final_1.ipynb  ← 16-pos classification (1-ant vs 4-ant)
+│   └── CSI_MIMO_Regression_Final_1.ipynb      ← 16-pos regression (1-ant vs 4-ant)
 └── data/
-    └── sample/                  ← Sample .pcap files (gitignored)
+    └── sample/                       ← Sample .pcap files (gitignored)
 ```
 
 ---
 
-## Quick Start
+## Two Paths to Get Started
 
-### Step 1 — Ubuntu build environment
+### Path A — Pre-compiled Binaries (Recommended for identical hardware)
 
-```bash
-sudo apt-get update
-sudo apt-get install git libssl-dev gawk qpdf python3 bc make gcc \
-     libgmp-dev autoconf automake libtool texinfo bison flex \
-     g++ g++-multilib libmpc-dev python-is-python3 python2
-sudo dpkg --add-architecture i386
-sudo apt update
-sudo apt install libc6:i386 libncurses5:i386 libstdc++6:i386 \
-     libmpc3:i386 libmpfr-dev:i386
-```
+If you have the **exact same hardware** (ASUS RT-AC86U, bcm4366c0, Merlin 386.14_2), use the pre-compiled binaries in `firmware/`. No build environment needed.
 
-### Step 2 — Clone repositories
+**Step 1 — Flash Merlin 386.14_2 firmware**
 
-```bash
-# Nexmon base
-git clone https://github.com/seemoo-lab/nexmon.git
-cd nexmon
+Download Merlin firmware from: https://sourceforge.net/projects/asuswrt-merlin/files/RT-AC86U/
 
-# Fix library symlinks (Ubuntu 22.04)
-sudo mkdir -p /usr/lib/arm-linux-gnueabihf
-cd buildtools/isl-0.10 && make clean && ./configure && make && sudo make install
-sudo ln -s /usr/local/lib/libisl.so /usr/lib/arm-linux-gnueabihf/libisl.so.10
-cd ../mpfr-3.1.4 && autoreconf -f -i && ./configure && make && sudo make install
-sudo ln -s /usr/local/lib/libmpfr.so /usr/lib/arm-linux-gnueabihf/libmpfr.so.4
-sudo ln -s /usr/lib/i386-linux-gnu/libmpfr.so.6 /usr/lib/i386-linux-gnu/libmpfr.so.4
-sudo ln -s /usr/lib/i386-linux-gnu/libmpc.so.3  /usr/lib/i386-linux-gnu/libmpc.so.3
-cd ../..
+Flash via router web UI: `http://192.168.1.1` → Administration → Firmware Upgrade
 
-# Build nexmon base
-source setup_env.sh
-make
+**Step 2 — Enable SSH and JFFS on router**
 
-# Clone nexmon_csi at tested commit
-cd patches/bcm4366c0/10_10_122_20/
-git clone https://github.com/seemoo-lab/nexmon_csi.git
-cd nexmon_csi
-git checkout 13f87d2   # tested working commit (pre-PR#256)
+In router web UI:
+- Administration → System → Enable SSH → Apply
+- Administration → System → Enable JFFS custom scripts → Apply
 
-# Toolchain
-cd ~/
-git clone https://github.com/RMerl/am-toolchains.git
-export AMCC=$(pwd)/am-toolchains/brcm-arm-hnd/crosstools-aarch64-gcc-5.3-linux-4.1-glibc-2.22-binutils-2.25/usr/bin/aarch64-buildroot-linux-gnu-
-```
-
-### Step 3 — Fix b43-v2 assembler (Ubuntu 22.04)
+**Step 3 — Copy pre-compiled binaries to router**
 
 ```bash
-# Install updated b43 assembler (supports xje instruction)
-cd ~
-git clone https://github.com/mbuesch/b43-tools.git
-# Use b43-v2 source from nexmon (it has xje support)
-cd ~/nexmon/buildtools/b43-v2/assembler
-make clean && make
-
-# Fix Python 2 beautifier
-sudo apt-get install python2 -y
-sudo sed -i 's|#!/usr/bin/env python$|#!/usr/bin/env python2|' \
-    ~/nexmon/buildtools/b43-v2/debug/b43-beautifier
+scp firmware/dhd.ko admin@192.168.1.1:/jffs/
+scp firmware/nexutil admin@192.168.1.1:/jffs/
+scp firmware/makecsiparams admin@192.168.1.1:/jffs/
 ```
 
-### Step 4 — Add missing include files to Makefile
-
-The assembler needs SHM/condition/register include files. Edit line 223 of the nexmon_csi Makefile:
-
-```bash
-cd ~/nexmon/patches/bcm4366c0/10_10_122_20/nexmon_csi
-sed -i 's|--cpp-args -DRXE_RXHDR_LEN=$(RXE_RXHDR_LEN) --|--cpp-args -DRXE_RXHDR_LEN=$(RXE_RXHDR_LEN) -include $(NEXMON_ROOT)/buildtools/$(B43VERSION)/debug/include/shm.inc -include $(NEXMON_ROOT)/buildtools/$(B43VERSION)/debug/include/cond.inc -include $(NEXMON_ROOT)/buildtools/$(B43VERSION)/debug/include/regs.inc -include $(NEXMON_ROOT)/buildtools/$(B43VERSION)/debug/include/spr.inc --|' Makefile
-```
-
-Also add `mov 0x86E, SPARE1` before `calls L902` in the ucode patch (line ~4332):
-
-```bash
-grep -n "calls.*L902" src/csi.ucode.bcm4366c0.10_10_122_20.asm | head -2
-# Fix line number as needed:
-sed -i '4332s/^\tcalls\tL902/\tmov\t0x86E, SPARE1\n\tcalls\tL902/' \
-    src/csi.ucode.bcm4366c0.10_10_122_20.asm
-```
-
-### Step 5 — Build nexutil for router
-
-```bash
-export LD_LIBRARY_PATH=/usr/lib/i386-linux-gnu:$LD_LIBRARY_PATH
-cd ~/nexmon/utilities/nexutil/
-export CC=${AMCC}gcc
-${AMCC}gcc -o nexutil nexutil.c bcmutils.c bcmwifi_channels.c \
-    b64-encode.c b64-decode.c \
-    ../libnexio/libnexio.c \
-    -I include -I ../libargp -I ../../patches/include \
-    -DVERSION=\"1.0\"
-scp nexutil admin@192.168.1.1:/jffs/
-```
-
-### Step 6 — Build & flash patched firmware
-
-```bash
-cd ~/nexmon/patches/bcm4366c0/10_10_122_20/nexmon_csi
-source ../../../../setup_env.sh
-export AMCC=~/am-toolchains/brcm-arm-hnd/crosstools-aarch64-gcc-5.3-linux-4.1-glibc-2.22-binutils-2.25/usr/bin/aarch64-buildroot-linux-gnu-
-export LD_LIBRARY_PATH=/usr/lib/i386-linux-gnu:$LD_LIBRARY_PATH
-make install-firmware REMOTEADDR=192.168.1.1
-```
-
-### Step 7 — Build & copy makecsiparams
-
-```bash
-cd utils/makecsiparams
-${AMCC}gcc -o makecsiparams makecsiparams.c bcmwifi_channels.c -I./
-scp makecsiparams admin@192.168.1.1:/jffs/
-```
-
-### Step 8 — Persistent firmware load on router
-
-SSH into the router and create startup script:
+**Step 4 — Create persistent startup script on router**
 
 ```bash
 ssh admin@192.168.1.1
@@ -175,44 +99,227 @@ chmod +x /jffs/scripts/init-start
 reboot
 ```
 
-After reboot, verify:
+**Step 5 — Verify Nexmon is active after reboot**
+
+Wait 45 seconds after reboot, then:
 ```bash
 ssh admin@192.168.1.1 "dmesg | grep -i nexmon"
-# Should show: nexmon.org/csi: a975-...
+# Expected: nexmon.org/csi: a975...
 ```
 
-### Step 9 — CSI Collection
-
-**Check which channel your 5GHz radio is on:**
-```bash
-ssh admin@192.168.1.1 "wl -i eth6 channel"
-# Note the channel (e.g. 44)
-```
-
-**Configure CSI extraction (on router):**
-```bash
-ssh admin@192.168.1.1 "service restart_wireless"
-ssh admin@192.168.1.1 "cd /jffs && \
-    wl -i eth6 up && ifconfig eth6 up && \
-    PARAMS=\$(./makecsiparams -c 44/80 -C 15 -N 15) && \
-    ./nexutil -Ieth6 -s500 -b -l34 -v \$PARAMS && \
-    wl -i eth6 monitor 1 && echo DONE"
-```
-
-**Capture on Ubuntu:**
-```bash
-sudo tcpdump -i eno1 -n ether src 4e:45:58:4d:4f:4e \
-    -w ~/captures/location_A.pcap
-```
-
-> `-m` flag omitted intentionally — using broadcast MAC filter causes 0 captures.
-> Source MAC `4e:45:58:4d:4f:4e` = "NEXMON" in ASCII.
+**Proceed to CSI Collection section below.**
 
 ---
 
-## Known Issues & Fixes
+### Path B — Build From Scratch
 
-See [docs/06_troubleshooting.md](docs/06_troubleshooting.md)
+Use this path if pre-compiled binaries don't work (firmware version mismatch or different hardware revision).
+
+See full step-by-step instructions in:
+- `docs/01_ubuntu_setup.md` — Ubuntu build environment
+- `docs/02_router_setup.md` — Router setup
+- `docs/03_nexmon_build.md` — Nexmon base build
+- `docs/04_nexmon_csi_build.md` — nexmon_csi patch build and flash
+
+**Quick summary of build steps:**
+
+```bash
+# 1. Install dependencies
+sudo apt-get update
+sudo apt-get install git libssl-dev gawk qpdf python3 bc make gcc \
+     libgmp-dev autoconf automake libtool texinfo bison flex \
+     g++ g++-multilib libmpc-dev python-is-python3 python2
+sudo dpkg --add-architecture i386
+sudo apt install libc6:i386 libncurses5:i386 libstdc++6:i386 \
+     libmpc3:i386 libmpfr-dev:i386
+
+# 2. Clone nexmon and fix symlinks (Ubuntu 22.04)
+git clone https://github.com/seemoo-lab/nexmon.git
+cd nexmon
+sudo mkdir -p /usr/lib/arm-linux-gnueabihf
+cd buildtools/isl-0.10 && make clean && ./configure && make && sudo make install
+sudo ln -s /usr/local/lib/libisl.so /usr/lib/arm-linux-gnueabihf/libisl.so.10
+cd ../mpfr-3.1.4 && autoreconf -f -i && ./configure && make && sudo make install
+sudo ln -s /usr/local/lib/libmpfr.so /usr/lib/arm-linux-gnueabihf/libmpfr.so.4
+sudo ln -s /usr/lib/i386-linux-gnu/libmpfr.so.6 /usr/lib/i386-linux-gnu/libmpfr.so.4
+cd ../..
+
+# 3. Build nexmon base
+source setup_env.sh && make
+
+# 4. Clone nexmon_csi at tested commit
+cd patches/bcm4366c0/10_10_122_20/
+git clone https://github.com/seemoo-lab/nexmon_csi.git
+cd nexmon_csi
+git checkout 13f87d2    # tested working commit (pre-PR#256)
+
+# 5. Get toolchain
+cd ~/
+git clone https://github.com/RMerl/am-toolchains.git
+export AMCC=$(pwd)/am-toolchains/brcm-arm-hnd/crosstools-aarch64-gcc-5.3-linux-4.1-glibc-2.22-binutils-2.25/usr/bin/aarch64-buildroot-linux-gnu-
+
+# 6. Fix b43-v2 assembler
+cd ~/nexmon/buildtools/b43-v2/assembler && make clean && make
+sudo apt-get install python2 -y
+sudo sed -i 's|#!/usr/bin/env python$|#!/usr/bin/env python2|' \
+    ~/nexmon/buildtools/b43-v2/debug/b43-beautifier
+
+# 7. Build and flash
+cd ~/nexmon/patches/bcm4366c0/10_10_122_20/nexmon_csi
+source ../../../../setup_env.sh
+export LD_LIBRARY_PATH=/usr/lib/i386-linux-gnu:$LD_LIBRARY_PATH
+make install-firmware REMOTEADDR=192.168.1.1
+
+# 8. Build and copy tools
+cd utils/makecsiparams
+${AMCC}gcc -o makecsiparams makecsiparams.c bcmwifi_channels.c -I./
+scp makecsiparams admin@192.168.1.1:/jffs/
+
+cd ~/nexmon/utilities/nexutil/
+${AMCC}gcc -o nexutil nexutil.c bcmutils.c bcmwifi_channels.c \
+    b64-encode.c b64-decode.c ../libnexio/libnexio.c \
+    -I include -I ../libargp -I ../../patches/include -DVERSION=\"1.0\"
+scp nexutil admin@192.168.1.1:/jffs/
+```
+
+See `docs/06_troubleshooting.md` for all known build errors and fixes.
+
+---
+
+## CSI Collection
+
+Once router is patched (via either path), follow this procedure every session.
+
+### CRITICAL parameters (verified working)
+
+```bash
+# CORRECT — use these exact parameters
+makecsiparams -c 44/40 -C 15 -N 1
+
+# WRONG — do not use these
+makecsiparams -c 44/80 -C 15 -N 15   # 80MHz gives only 1 core, N=15 is wrong
+```
+
+| Parameter | Value | Meaning |
+|-----------|-------|---------|
+| `-c` | `44/40` | Channel 44, **40MHz** bandwidth |
+| `-C` | `15` (0b1111) | All 4 antenna cores enabled |
+| `-N` | `1` | 1 spatial stream (matches ESP32-C5 single antenna) |
+
+### Activation command (run once per session)
+
+```bash
+# Step 1 — Set channel via web UI: http://192.168.1.1
+# Wireless → Professional → 5GHz → Channel=44, Bandwidth=40MHz → Apply
+
+# Step 2 — Restart wireless
+ssh admin@192.168.1.1 "service restart_wireless"
+# Wait 15 seconds
+
+# Step 3 — Apply CSI params and enable monitor mode
+ssh admin@192.168.1.1 "cd /jffs && wl -i eth6 up && ifconfig eth6 up && PARAMS=\$(./makecsiparams -c 44/40 -C 15 -N 1) && ./nexutil -Ieth6 -s500 -b -l34 -v \$PARAMS && wl -i eth6 monitor 1 && echo DONE"
+
+# Step 4 — Verify channel
+ssh admin@192.168.1.1 "wl -i eth6 chanspec"
+# Expected: 44l (0xd82e)
+
+# Step 5 — Verify packets flowing
+sudo tcpdump -i eno1 ether src 4e:45:58:4d:4f:4e -c 20
+# Expected: 20 packets captured within 1-2 seconds
+```
+
+### Capture per position
+
+```bash
+sudo tcpdump -i eno1 ether src 4e:45:58:4d:4f:4e \
+    -w ~/captures/16pos_experiment/posN_4ant.pcap
+# Wait 3 minutes → Ctrl+C → move to next position
+```
+
+See `docs/07_data_capture_pipeline.md` for the complete verified 16-position procedure.
+
+---
+
+## Parser
+
+```bash
+cd parsing
+pip install -r requirements.txt
+
+# Basic stats
+python nexmon_csi.py ~/captures/16pos_experiment/pos1_4ant.pcap --stats
+
+# Filter to ESP32-C5 only
+python nexmon_csi.py ~/captures/16pos_experiment/pos1_4ant.pcap \
+    --stats --mac d0:cf:13:e2:88:94
+
+# List all transmitters
+python nexmon_csi.py ~/captures/16pos_experiment/pos1_4ant.pcap --list-macs
+```
+
+Expected output at 40MHz with C15:
+- `chanspec: 0xd82e` (ch44/40MHz)
+- `bandwidth: 40 MHz`
+- `subcarriers: 64` per core
+- ~77 fps
+- 4 packets per probe request (one per antenna core)
+
+---
+
+## ML Pipeline
+
+Both notebooks are in `ml/` and support toggles for all experiment configurations:
+
+| Notebook | Task | Toggles |
+|----------|------|---------|
+| `CSI_MIMO_Classification_Final_1.ipynb` | 16-class position classification | `FEATURE_TYPE`, `ENABLE_MRC`, `ENABLE_RF` |
+| `CSI_MIMO_Regression_Final_1.ipynb` | XY coordinate regression | `SPLIT_TYPE`, `FEATURE_TYPE`, `ENABLE_MRC`, `ENABLE_RF` |
+
+### Feature strategies
+
+| Strategy | Features | Description |
+|----------|----------|-------------|
+| 1-Antenna | 61 | Core 0 only, 61 valid subcarrier amp² (subs 0,1,63 removed) |
+| 4-Antenna | 244 | All 4 cores concatenated, 61 subcarriers each |
+| MRC (optional) | 61 | Sum of amp² across all 4 cores |
+
+### Setup
+
+```bash
+cd ~/localization
+python -m venv .venv
+source .venv/bin/activate
+pip install -r parsing/requirements.txt
+jupyter notebook
+```
+
+Open `ml/CSI_MIMO_Classification_Final_1.ipynb` or `ml/CSI_MIMO_Regression_Final_1.ipynb`.
+
+---
+
+## Updating ML Scripts
+
+When you modify a notebook and want to save it to the repo:
+
+```bash
+cd ~/nexmon-csi-localization/nexmon-csi-localization
+cp ~/localization/CSI_MIMO_Classification_Final_1.ipynb ml/
+cp ~/localization/CSI_MIMO_Regression_Final_1.ipynb ml/
+git add ml/
+git commit -m "Update ML notebooks with new results"
+git push origin main
+```
+
+---
+
+## Known Issues
+
+See `docs/06_troubleshooting.md` for all known issues including:
+- Channel resetting to 149/20MHz after `service restart_wireless`
+- `nexutil errno=19` — Nexmon patch not active
+- `0 packets captured` — monitor mode not enabled
+- Core separation bugs in parser
+- Build errors on Ubuntu 22.04
 
 ---
 
